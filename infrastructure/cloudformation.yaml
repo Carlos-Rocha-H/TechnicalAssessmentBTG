@@ -1,0 +1,528 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  BTG Pactual - Investment Fund Self-Service API
+  Infraestructura completa: DynamoDB, ECS Fargate, API Gateway, IAM, SES, SNS
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Ambiente de despliegue
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: ID del VPC donde se desplegara la infraestructura
+
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: IDs de las subnets publicas para el ALB y tareas ECS
+
+  ContainerImage:
+    Type: String
+    Description: URI de la imagen Docker del API (ej. 123456789.dkr.ecr.us-east-1.amazonaws.com/btgpactual:latest)
+
+  JwtSecret:
+    Type: String
+    NoEcho: true
+    MinLength: 32
+    Description: Clave secreta para firmar tokens JWT (minimo 32 caracteres)
+
+  SesFromEmail:
+    Type: String
+    Default: noreply@btgpactual.com
+    Description: Email verificado en SES para enviar notificaciones
+
+  DesiredTaskCount:
+    Type: Number
+    Default: 2
+    MinValue: 1
+    MaxValue: 10
+    Description: Numero de tareas ECS deseadas
+
+Resources:
+  # ============================================================
+  # DynamoDB Tables (HU-05)
+  # ============================================================
+
+  ClientsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: !Sub 'Clients-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: clientId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: clientId
+          KeyType: HASH
+      Tags:
+        - Key: Project
+          Value: btgpactual
+        - Key: Environment
+          Value: !Ref Environment
+
+  FundsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: !Sub 'Funds-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      AttributeDefinitions:
+        - AttributeName: fundId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: fundId
+          KeyType: HASH
+      Tags:
+        - Key: Project
+          Value: btgpactual
+        - Key: Environment
+          Value: !Ref Environment
+
+  TransactionsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: !Sub 'Transactions-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: transactionId
+          AttributeType: S
+        - AttributeName: clientId
+          AttributeType: S
+        - AttributeName: subscriptionId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: transactionId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: clientId-index
+          KeySchema:
+            - AttributeName: clientId
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        - IndexName: subscriptionId-index
+          KeySchema:
+            - AttributeName: subscriptionId
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Project
+          Value: btgpactual
+        - Key: Environment
+          Value: !Ref Environment
+
+  SubscriptionsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: !Sub 'Subscriptions-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      AttributeDefinitions:
+        - AttributeName: clientId
+          AttributeType: S
+        - AttributeName: fundId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: clientId
+          KeyType: HASH
+        - AttributeName: fundId
+          KeyType: RANGE
+      Tags:
+        - Key: Project
+          Value: btgpactual
+        - Key: Environment
+          Value: !Ref Environment
+
+  UsersTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: !Sub 'Users-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: username
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: username-index
+          KeySchema:
+            - AttributeName: username
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Project
+          Value: btgpactual
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ============================================================
+  # IAM Roles
+  # ============================================================
+
+  EcsTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'btgpactual-ecs-execution-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  EcsTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'btgpactual-ecs-task-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - dynamodb:BatchGetItem
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:DescribeTable
+                Resource:
+                  - !GetAtt ClientsTable.Arn
+                  - !GetAtt FundsTable.Arn
+                  - !GetAtt TransactionsTable.Arn
+                  - !Sub '${TransactionsTable.Arn}/index/*'
+                  - !GetAtt SubscriptionsTable.Arn
+                  - !GetAtt UsersTable.Arn
+                  - !Sub '${UsersTable.Arn}/index/*'
+        - PolicyName: SESAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ses:SendEmail
+                  - ses:SendRawEmail
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    ses:FromAddress: !Ref SesFromEmail
+        - PolicyName: SNSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: '*'
+
+  # ============================================================
+  # ECS Cluster & Service (Fargate)
+  # ============================================================
+
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub 'btgpactual-${Environment}'
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/btgpactual-${Environment}'
+      RetentionInDays: 30
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub 'btgpactual-api-${Environment}'
+      Cpu: '512'
+      Memory: '1024'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt EcsTaskRole.Arn
+      ContainerDefinitions:
+        - Name: btgpactual-api
+          Image: !Ref ContainerImage
+          Essential: true
+          PortMappings:
+            - ContainerPort: 8080
+              Protocol: tcp
+          Environment:
+            - Name: SPRING_PROFILES_ACTIVE
+              Value: aws
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+            - Name: JWT_SECRET
+              Value: !Ref JwtSecret
+            - Name: JWT_EXPIRATION_MS
+              Value: '3600000'
+            - Name: SES_FROM_EMAIL
+              Value: !Ref SesFromEmail
+            - Name: DYNAMODB_CLIENTS_TABLE
+              Value: !Ref ClientsTable
+            - Name: DYNAMODB_FUNDS_TABLE
+              Value: !Ref FundsTable
+            - Name: DYNAMODB_TRANSACTIONS_TABLE
+              Value: !Ref TransactionsTable
+            - Name: DYNAMODB_SUBSCRIPTIONS_TABLE
+              Value: !Ref SubscriptionsTable
+            - Name: DYNAMODB_USERS_TABLE
+              Value: !Ref UsersTable
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: api
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - curl -f http://localhost:8080/actuator/health || exit 1
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 60
+
+  SecurityGroupALB:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for BTG Pactual ALB
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub 'btgpactual-alb-sg-${Environment}'
+
+  SecurityGroupEcs:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for BTG Pactual ECS tasks
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref SecurityGroupALB
+      Tags:
+        - Key: Name
+          Value: !Sub 'btgpactual-ecs-sg-${Environment}'
+
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub 'btgpactual-${Environment}'
+      Scheme: internet-facing
+      Type: application
+      Subnets: !Ref SubnetIds
+      SecurityGroups:
+        - !Ref SecurityGroupALB
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub 'btgpactual-tg-${Environment}'
+      Port: 8080
+      Protocol: HTTP
+      VpcId: !Ref VpcId
+      TargetType: ip
+      HealthCheckPath: /actuator/health
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      HealthCheckTimeoutSeconds: 5
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  CertificateArn:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/btgpactual/${Environment}/certificate-arn'
+      Type: String
+      Value: 'arn:aws:acm:us-east-1:ACCOUNT_ID:certificate/PLACEHOLDER'
+      Description: ARN del certificado ACM para HTTPS (reemplazar antes del despliegue)
+
+  EcsService:
+    Type: AWS::ECS::Service
+    DependsOn: ALBListener
+    Properties:
+      ServiceName: !Sub 'btgpactual-api-${Environment}'
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: !Ref DesiredTaskCount
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets: !Ref SubnetIds
+          SecurityGroups:
+            - !Ref SecurityGroupEcs
+      LoadBalancers:
+        - ContainerName: btgpactual-api
+          ContainerPort: 8080
+          TargetGroupArn: !Ref TargetGroup
+
+  # ============================================================
+  # API Gateway (HTTP API)
+  # ============================================================
+
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub 'btgpactual-api-${Environment}'
+      ProtocolType: HTTP
+      Description: API Gateway para BTG Pactual Investment Fund API
+      CorsConfiguration:
+        AllowHeaders:
+          - Authorization
+          - Content-Type
+        AllowMethods:
+          - GET
+          - POST
+          - DELETE
+          - OPTIONS
+        AllowOrigins:
+          - '*'
+        MaxAge: 3600
+
+  VpcLink:
+    Type: AWS::ApiGatewayV2::VpcLink
+    Properties:
+      Name: !Sub 'btgpactual-vpclink-${Environment}'
+      SubnetIds: !Ref SubnetIds
+      SecurityGroupIds:
+        - !Ref SecurityGroupEcs
+
+  HttpApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: HTTP_PROXY
+      IntegrationUri: !GetAtt ALBListener.ListenerArn
+      IntegrationMethod: ANY
+      ConnectionType: VPC_LINK
+      ConnectionId: !Ref VpcLink
+      PayloadFormatVersion: '1.0'
+
+  HttpApiDefaultRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: '$default'
+      Target: !Sub 'integrations/${HttpApiIntegration}'
+
+  HttpApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: !Ref Environment
+      AutoDeploy: true
+      AccessLogSettings:
+        DestinationArn: !GetAtt ApiGatewayLogGroup.Arn
+        Format: >-
+          {"requestId":"$context.requestId","ip":"$context.identity.sourceIp",
+          "requestTime":"$context.requestTime","httpMethod":"$context.httpMethod",
+          "routeKey":"$context.routeKey","status":"$context.status",
+          "responseLength":"$context.responseLength","error":"$context.error.message"}
+
+  ApiGatewayLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/apigateway/btgpactual-${Environment}'
+      RetentionInDays: 30
+
+# ============================================================
+# Outputs
+# ============================================================
+
+Outputs:
+  ApiGatewayUrl:
+    Description: URL del API Gateway
+    Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}'
+
+  LoadBalancerDns:
+    Description: DNS del Application Load Balancer
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+
+  EcsClusterName:
+    Description: Nombre del cluster ECS
+    Value: !Ref EcsCluster
+
+  ClientsTableName:
+    Description: Nombre de la tabla Clients
+    Value: !Ref ClientsTable
+
+  FundsTableName:
+    Description: Nombre de la tabla Funds
+    Value: !Ref FundsTable
+
+  TransactionsTableName:
+    Description: Nombre de la tabla Transactions
+    Value: !Ref TransactionsTable
+
+  SubscriptionsTableName:
+    Description: Nombre de la tabla Subscriptions
+    Value: !Ref SubscriptionsTable
+
+  UsersTableName:
+    Description: Nombre de la tabla Users
+    Value: !Ref UsersTable
+
+  EcsTaskRoleArn:
+    Description: ARN del rol IAM de las tareas ECS
+    Value: !GetAtt EcsTaskRole.Arn
