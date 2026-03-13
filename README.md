@@ -34,8 +34,9 @@ API REST de autogestión de fondos de inversión para clientes BTG Pactual. Perm
 | **AWS SNS** | Notificaciones por SMS |
 | **Spring Security + JWT** (jjwt 0.12.6) | Autenticación y autorización |
 | **SpringDoc OpenAPI** (2.8.6) | Documentación Swagger UI |
+| **Spring Boot Actuator** | Health checks para el ALB |
 | **Lombok** | Reducción de boilerplate |
-| **ECS Fargate** | Contenedorización serverless |
+| **ECS EC2** (t3.micro) | Contenedorización en instancia Free Tier |
 | **API Gateway** | Punto de entrada HTTP |
 | **CloudFormation** | Infraestructura como código |
 | **LocalStack** (Docker Compose) | Emulación local de servicios AWS |
@@ -85,7 +86,7 @@ btgpactual/
 │   ├── config/
 │   │   ├── AwsConfig.java                     # Beans AWS (SES, SNS clients)
 │   │   ├── DynamoDbConfig.java                # DynamoDB Enhanced Client + tabla registrations
-│   │   ├── DataSeeder.java                    # Creación de tablas y datos semilla al arrancar
+│   │   ├── DataSeeder.java                    # Creación de tablas y datos semilla (solo perfil local/localstack)
 │   │   └── OpenApiConfig.java                 # Configuración Swagger/OpenAPI con JWT
 │   ├── controller/
 │   │   ├── AuthController.java                # POST /auth/login, POST /auth/register
@@ -178,10 +179,12 @@ btgpactual/
 
 ### Datos Semilla (DataSeeder)
 
-Al arrancar, la aplicación crea las tablas si no existen y carga:
-- **5 fondos**: FPV_BTG_PACTUAL_RECAUDADORA, FPV_BTG_PACTUAL_ECOPETROL, DEUDAPRIVADA, FDO_BTG_PACTUAL_DINAMICA, FPV_BTG_PACTUAL_ACCIONES
+En desarrollo local (`@Profile("!aws")`), la aplicación crea las tablas si no existen y carga:
+- **5 fondos**: FPV_BTG_PACTUAL_RECAUDADORA, FPV_BTG_PACTUAL_ECOPETROL, DEUDAPRIVADA, FDO-ACCIONES, FPV_BTG_PACTUAL_DINAMICA
 - **1 cliente demo**: con saldo inicial de $500,000 COP
 - **2 usuarios**: `cliente1` (rol CLIENT) y `admin` (rol ADMIN)
+
+> **Nota:** En AWS (perfil `aws`), el DataSeeder no se ejecuta. Las tablas son creadas por CloudFormation y los datos deben insertarse manualmente o via la API (`/api/v1/auth/register` para usuarios).
 
 ---
 
@@ -386,11 +389,10 @@ Acceder a `http://localhost:8080/swagger-ui/index.html` para explorar los endpoi
 
 ### Prerrequisitos
 
-1. **Cuenta AWS** con permisos de administrador o permisos para crear: DynamoDB, ECS, API Gateway, IAM, CloudWatch, EC2 (VPC/SG/ALB), SSM, ACM
+1. **Cuenta AWS** con permisos de administrador o permisos para crear: DynamoDB, ECS, API Gateway, IAM, CloudWatch, EC2 (VPC/SG/ALB), SSM
 2. **AWS CLI** configurado (`aws configure`)
 3. **VPC existente** con al menos 2 subnets públicas
 4. **Imagen Docker** del API publicada en Amazon ECR
-5. **Certificado ACM** para HTTPS (opcional para pruebas)
 
 ### Paso 1: Construir y publicar la imagen Docker
 
@@ -410,19 +412,7 @@ docker tag btgpactual:latest <ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/btgpac
 docker push <ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/btgpactual:latest
 ```
 
-### Paso 2: Configurar el certificado ACM
-
-```bash
-aws ssm put-parameter \
-  --name "/btgpactual/dev/certificate-arn" \
-  --value "arn:aws:acm:us-east-1:<ACCOUNT_ID>:certificate/<CERT_ID>" \
-  --type String \
-  --overwrite
-```
-
-> **Nota:** Para pruebas sin HTTPS, modificar el Listener en el template a puerto 80/HTTP.
-
-### Paso 3: Crear el stack de CloudFormation
+### Paso 2: Crear el stack de CloudFormation
 
 ```bash
 aws cloudformation create-stack \
@@ -435,11 +425,10 @@ aws cloudformation create-stack \
     ParameterKey=SubnetIds,ParameterValue="subnet-aaa,subnet-bbb" \
     ParameterKey=ContainerImage,ParameterValue=<ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/btgpactual:latest \
     ParameterKey=JwtSecret,ParameterValue="mi-clave-secreta-jwt-super-segura-256bits" \
-    ParameterKey=SesFromEmail,ParameterValue=noreply@btgpactual.com \
-    ParameterKey=DesiredTaskCount,ParameterValue=2
+    ParameterKey=SesFromEmail,ParameterValue=noreply@btgpactual.com
 ```
 
-### Paso 4: Monitorear el despliegue
+### Paso 3: Monitorear el despliegue
 
 ```bash
 aws cloudformation describe-stacks --stack-name btgpactual-dev --query 'Stacks[0].StackStatus'
@@ -447,7 +436,7 @@ aws cloudformation wait stack-create-complete --stack-name btgpactual-dev
 aws cloudformation describe-stacks --stack-name btgpactual-dev --query 'Stacks[0].Outputs'
 ```
 
-### Paso 5: Verificar el despliegue
+### Paso 4: Verificar el despliegue
 
 ```bash
 API_URL=$(aws cloudformation describe-stacks --stack-name btgpactual-dev \
@@ -459,7 +448,7 @@ curl -X POST $API_URL/api/v1/auth/login \
   -d '{"username":"cliente1","password":"password123"}'
 ```
 
-### Paso 6: Verificar SES (email)
+### Paso 5: Verificar SES (email)
 
 ```bash
 aws ses verify-email-identity --email-address noreply@btgpactual.com
@@ -479,8 +468,7 @@ aws cloudformation update-stack \
     ParameterKey=SubnetIds,UsePreviousValue=true \
     ParameterKey=ContainerImage,ParameterValue=<ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/btgpactual:v2 \
     ParameterKey=JwtSecret,UsePreviousValue=true \
-    ParameterKey=SesFromEmail,UsePreviousValue=true \
-    ParameterKey=DesiredTaskCount,UsePreviousValue=true
+    ParameterKey=SesFromEmail,UsePreviousValue=true
 ```
 
 ### Eliminar el stack
@@ -490,14 +478,7 @@ aws cloudformation delete-stack --stack-name btgpactual-dev
 aws cloudformation wait stack-delete-complete --stack-name btgpactual-dev
 ```
 
-> **Nota:** Las tablas DynamoDB tienen `DeletionPolicy: Retain` y no se eliminarán automáticamente. Para eliminarlas manualmente:
-> ```bash
-> aws dynamodb delete-table --table-name Clients-dev
-> aws dynamodb delete-table --table-name Funds-dev
-> aws dynamodb delete-table --table-name Transactions-dev
-> aws dynamodb delete-table --table-name Subscriptions-dev
-> aws dynamodb delete-table --table-name Users-dev
-> ```
+> **Nota:** Las tablas DynamoDB tienen `DeletionPolicy: Delete` y se eliminarán automáticamente junto con el stack.
 
 ---
 
@@ -510,12 +491,15 @@ aws cloudformation wait stack-delete-complete --stack-name btgpactual-dev
 | Transactions | DynamoDB Table | Transacciones con GSIs clientId-index, subscriptionId-index |
 | Subscriptions | DynamoDB Table | Suscripciones activas (PK: clientId, SK: fundId) |
 | Users | DynamoDB Table | Usuarios autenticación (PK: userId, GSI: username-index) |
-| ECS Cluster | ECS | Cluster Fargate con Container Insights |
-| Task Definition | ECS | 512 CPU / 1024 MB, Java 25 |
-| ECS Service | ECS | Servicio con ALB integration |
-| ALB | Load Balancer | Application Load Balancer HTTPS |
+| ECS Cluster | ECS | Cluster EC2 (t3.micro Free Tier) |
+| Launch Template | EC2 | t3.micro con ECS-optimized AMI |
+| Auto Scaling Group | EC2 | Min/Max/Desired: 1 instancia |
+| Capacity Provider | ECS | Asociación ASG → ECS Cluster |
+| Task Definition | ECS | 256 CPU / 512 MB, bridge networking, Java 25 |
+| ECS Service | ECS | 1 tarea con ALB integration |
+| ALB | Load Balancer | Application Load Balancer HTTP (puerto 80) |
 | API Gateway | HTTP API | Punto de entrada con CORS y logging |
-| IAM Roles | IAM | Execution role + Task role (DynamoDB, SES, SNS) |
+| IAM Roles | IAM | Execution role + Task role (DynamoDB, SES, SNS) + EC2 Instance role |
 | CloudWatch Logs | Logs | Logs de ECS y API Gateway (30 días retención) |
 
 ---

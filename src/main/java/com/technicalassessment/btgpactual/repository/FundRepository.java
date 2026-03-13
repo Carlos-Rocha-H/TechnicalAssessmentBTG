@@ -1,6 +1,7 @@
 package com.technicalassessment.btgpactual.repository;
 
 import com.technicalassessment.btgpactual.model.Fund;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Repository;
 import software.amazon.awssdk.enhanced.dynamodb.DynamoDbEnhancedClient;
 import software.amazon.awssdk.enhanced.dynamodb.DynamoDbTable;
@@ -15,8 +16,9 @@ public class FundRepository {
 
     private final DynamoDbTable<Fund> table;
 
-    public FundRepository(DynamoDbEnhancedClient enhancedClient) {
-        this.table = enhancedClient.table("Funds", TableSchema.fromBean(Fund.class));
+    public FundRepository(DynamoDbEnhancedClient enhancedClient,
+                          @Value("${aws.dynamodb.table.funds:Funds}") String tableName) {
+        this.table = enhancedClient.table(tableName, TableSchema.fromBean(Fund.class));
     }
 
     public void save(Fund fund) {

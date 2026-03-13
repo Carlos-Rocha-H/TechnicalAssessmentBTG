@@ -1,6 +1,7 @@
 package com.technicalassessment.btgpactual.repository;
 
 import com.technicalassessment.btgpactual.model.Transaction;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Repository;
 import software.amazon.awssdk.enhanced.dynamodb.DynamoDbEnhancedClient;
 import software.amazon.awssdk.enhanced.dynamodb.DynamoDbIndex;
@@ -19,8 +20,9 @@ public class TransactionRepository {
     private final DynamoDbIndex<Transaction> clientIdIndex;
     private final DynamoDbIndex<Transaction> subscriptionIdIndex;
 
-    public TransactionRepository(DynamoDbEnhancedClient enhancedClient) {
-        this.table = enhancedClient.table("Transactions", TableSchema.fromBean(Transaction.class));
+    public TransactionRepository(DynamoDbEnhancedClient enhancedClient,
+                                @Value("${aws.dynamodb.table.transactions:Transactions}") String tableName) {
+        this.table = enhancedClient.table(tableName, TableSchema.fromBean(Transaction.class));
         this.clientIdIndex = table.index("clientId-index");
         this.subscriptionIdIndex = table.index("subscriptionId-index");
     }

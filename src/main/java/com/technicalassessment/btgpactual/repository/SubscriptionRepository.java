@@ -1,6 +1,7 @@
 package com.technicalassessment.btgpactual.repository;
 
 import com.technicalassessment.btgpactual.model.Subscription;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Repository;
 import software.amazon.awssdk.enhanced.dynamodb.DynamoDbEnhancedClient;
 import software.amazon.awssdk.enhanced.dynamodb.DynamoDbTable;
@@ -16,8 +17,9 @@ public class SubscriptionRepository {
 
     private final DynamoDbTable<Subscription> table;
 
-    public SubscriptionRepository(DynamoDbEnhancedClient enhancedClient) {
-        this.table = enhancedClient.table("Subscriptions", TableSchema.fromBean(Subscription.class));
+    public SubscriptionRepository(DynamoDbEnhancedClient enhancedClient,
+                                  @Value("${aws.dynamodb.table.subscriptions:Subscriptions}") String tableName) {
+        this.table = enhancedClient.table(tableName, TableSchema.fromBean(Subscription.class));
     }
 
     public void save(Subscription subscription) {

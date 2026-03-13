@@ -1,6 +1,7 @@
 package com.technicalassessment.btgpactual.repository;
 
 import com.technicalassessment.btgpactual.model.User;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Repository;
 import software.amazon.awssdk.enhanced.dynamodb.DynamoDbEnhancedClient;
 import software.amazon.awssdk.enhanced.dynamodb.DynamoDbIndex;
@@ -17,8 +18,9 @@ public class UserRepository {
     private final DynamoDbTable<User> table;
     private final DynamoDbIndex<User> usernameIndex;
 
-    public UserRepository(DynamoDbEnhancedClient enhancedClient) {
-        this.table = enhancedClient.table("Users", TableSchema.fromBean(User.class));
+    public UserRepository(DynamoDbEnhancedClient enhancedClient,
+                          @Value("${aws.dynamodb.table.users:Users}") String tableName) {
+        this.table = enhancedClient.table(tableName, TableSchema.fromBean(User.class));
         this.usernameIndex = table.index("username-index");
     }
 

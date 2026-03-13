@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   BTG Pactual - Investment Fund Self-Service API
-  Infraestructura completa: DynamoDB, ECS Fargate, API Gateway, IAM, SES, SNS
+  Infraestructura completa (Free Tier): DynamoDB, ECS EC2, API Gateway, IAM, SES, SNS
 
 Parameters:
   Environment:
@@ -16,7 +16,7 @@ Parameters:
 
   SubnetIds:
     Type: List<AWS::EC2::Subnet::Id>
-    Description: IDs de las subnets publicas para el ALB y tareas ECS
+    Description: IDs de las subnets publicas para el ALB e instancia EC2
 
   ContainerImage:
     Type: String
@@ -33,28 +33,28 @@ Parameters:
     Default: noreply@btgpactual.com
     Description: Email verificado en SES para enviar notificaciones
 
-  DesiredTaskCount:
-    Type: Number
-    Default: 2
-    MinValue: 1
-    MaxValue: 10
-    Description: Numero de tareas ECS deseadas
+  EcsAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ecs/optimized-ami/amazon-linux-2/recommended/image_id
+    Description: AMI optimizada para ECS (se resuelve automaticamente via SSM)
 
 Resources:
   # ============================================================
-  # DynamoDB Tables (HU-05)
+  # DynamoDB Tables - PROVISIONED (Free Tier: 25 RCU + 25 WCU total)
+  # Distribucion: 5 tablas x 3 + 3 GSIs x 3 = 24 RCU/WCU (< 25 limite)
   # ============================================================
 
   ClientsTable:
     Type: AWS::DynamoDB::Table
-    DeletionPolicy: Retain
+    DeletionPolicy: Delete
     Properties:
       TableName: !Sub 'Clients-${Environment}'
-      BillingMode: PAY_PER_REQUEST
+      BillingMode: PROVISIONED
+      ProvisionedThroughput:
+        ReadCapacityUnits: 3
+        WriteCapacityUnits: 3
       SSESpecification:
         SSEEnabled: true
-      PointInTimeRecoverySpecification:
-        PointInTimeRecoveryEnabled: true
       AttributeDefinitions:
         - AttributeName: clientId
           AttributeType: S
@@ -69,10 +69,13 @@ Resources:
 
   FundsTable:
     Type: AWS::DynamoDB::Table
-    DeletionPolicy: Retain
+    DeletionPolicy: Delete
     Properties:
       TableName: !Sub 'Funds-${Environment}'
-      BillingMode: PAY_PER_REQUEST
+      BillingMode: PROVISIONED
+      ProvisionedThroughput:
+        ReadCapacityUnits: 3
+        WriteCapacityUnits: 3
       SSESpecification:
         SSEEnabled: true
       AttributeDefinitions:
@@ -89,14 +92,15 @@ Resources:
 
   TransactionsTable:
     Type: AWS::DynamoDB::Table
-    DeletionPolicy: Retain
+    DeletionPolicy: Delete
     Properties:
       TableName: !Sub 'Transactions-${Environment}'
-      BillingMode: PAY_PER_REQUEST
+      BillingMode: PROVISIONED
+      ProvisionedThroughput:
+        ReadCapacityUnits: 3
+        WriteCapacityUnits: 3
       SSESpecification:
         SSEEnabled: true
-      PointInTimeRecoverySpecification:
-        PointInTimeRecoveryEnabled: true
       AttributeDefinitions:
         - AttributeName: transactionId
           AttributeType: S
@@ -114,12 +118,18 @@ Resources:
               KeyType: HASH
           Projection:
             ProjectionType: ALL
+          ProvisionedThroughput:
+            ReadCapacityUnits: 3
+            WriteCapacityUnits: 3
         - IndexName: subscriptionId-index
           KeySchema:
             - AttributeName: subscriptionId
               KeyType: HASH
           Projection:
             ProjectionType: ALL
+          ProvisionedThroughput:
+            ReadCapacityUnits: 3
+            WriteCapacityUnits: 3
       Tags:
         - Key: Project
           Value: btgpactual
@@ -128,10 +138,13 @@ Resources:
 
   SubscriptionsTable:
     Type: AWS::DynamoDB::Table
-    DeletionPolicy: Retain
+    DeletionPolicy: Delete
     Properties:
       TableName: !Sub 'Subscriptions-${Environment}'
-      BillingMode: PAY_PER_REQUEST
+      BillingMode: PROVISIONED
+      ProvisionedThroughput:
+        ReadCapacityUnits: 3
+        WriteCapacityUnits: 3
       SSESpecification:
         SSEEnabled: true
       AttributeDefinitions:
@@ -152,10 +165,13 @@ Resources:
 
   UsersTable:
     Type: AWS::DynamoDB::Table
-    DeletionPolicy: Retain
+    DeletionPolicy: Delete
     Properties:
       TableName: !Sub 'Users-${Environment}'
-      BillingMode: PAY_PER_REQUEST
+      BillingMode: PROVISIONED
+      ProvisionedThroughput:
+        ReadCapacityUnits: 3
+        WriteCapacityUnits: 3
       SSESpecification:
         SSEEnabled: true
       AttributeDefinitions:
@@ -173,6 +189,9 @@ Resources:
               KeyType: HASH
           Projection:
             ProjectionType: ALL
+          ProvisionedThroughput:
+            ReadCapacityUnits: 3
+            WriteCapacityUnits: 3
       Tags:
         - Key: Project
           Value: btgpactual
@@ -180,7 +199,7 @@ Resources:
           Value: !Ref Environment
 
   # ============================================================
-  # IAM Roles
+  # IAM Roles (Gratis)
   # ============================================================
 
   EcsTaskExecutionRole:
@@ -253,17 +272,35 @@ Resources:
                   - sns:Publish
                 Resource: '*'
 
+  # Rol IAM para la instancia EC2 que ejecuta el agente ECS
+  EcsEc2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'btgpactual-ecs-ec2-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+
+  EcsInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EcsEc2Role
+
   # ============================================================
-  # ECS Cluster & Service (Fargate)
+  # ECS Cluster & Service (EC2 - Free Tier: t2.micro 750 hrs/mes)
   # ============================================================
 
   EcsCluster:
     Type: AWS::ECS::Cluster
     Properties:
       ClusterName: !Sub 'btgpactual-${Environment}'
-      ClusterSettings:
-        - Name: containerInsights
-          Value: enabled
 
   LogGroup:
     Type: AWS::Logs::LogGroup
@@ -271,23 +308,74 @@ Resources:
       LogGroupName: !Sub '/ecs/btgpactual-${Environment}'
       RetentionInDays: 30
 
+  EcsLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub 'btgpactual-ecs-${Environment}'
+      LaunchTemplateData:
+        InstanceType: t3.micro
+        ImageId: !Ref EcsAmiId
+        IamInstanceProfile:
+          Arn: !GetAtt EcsInstanceProfile.Arn
+        SecurityGroupIds:
+          - !Ref SecurityGroupEcs
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            echo ECS_CLUSTER=${EcsCluster} >> /etc/ecs/ecs.config
+
+  EcsAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref EcsLaunchTemplate
+        Version: !GetAtt EcsLaunchTemplate.LatestVersionNumber
+      MinSize: 1
+      MaxSize: 1
+      DesiredCapacity: 1
+      VPCZoneIdentifier: !Ref SubnetIds
+      Tags:
+        - Key: Name
+          Value: !Sub 'btgpactual-ecs-${Environment}'
+          PropagateAtLaunch: true
+
+  EcsCapacityProvider:
+    Type: AWS::ECS::CapacityProvider
+    Properties:
+      AutoScalingGroupProvider:
+        AutoScalingGroupArn: !Ref EcsAutoScalingGroup
+        ManagedScaling:
+          Status: DISABLED
+        ManagedTerminationProtection: DISABLED
+
+  EcsClusterCapacityProviderAssociation:
+    Type: AWS::ECS::ClusterCapacityProviderAssociations
+    Properties:
+      Cluster: !Ref EcsCluster
+      CapacityProviders:
+        - !Ref EcsCapacityProvider
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: !Ref EcsCapacityProvider
+          Weight: 1
+
   TaskDefinition:
     Type: AWS::ECS::TaskDefinition
     Properties:
       Family: !Sub 'btgpactual-api-${Environment}'
-      Cpu: '512'
-      Memory: '1024'
-      NetworkMode: awsvpc
+      NetworkMode: bridge
       RequiresCompatibilities:
-        - FARGATE
+        - EC2
       ExecutionRoleArn: !GetAtt EcsTaskExecutionRole.Arn
       TaskRoleArn: !GetAtt EcsTaskRole.Arn
       ContainerDefinitions:
         - Name: btgpactual-api
           Image: !Ref ContainerImage
           Essential: true
+          Memory: 512
+          Cpu: 256
           PortMappings:
             - ContainerPort: 8080
+              HostPort: 0
               Protocol: tcp
           Environment:
             - Name: SPRING_PROFILES_ACTIVE
@@ -316,14 +404,6 @@ Resources:
               awslogs-group: !Ref LogGroup
               awslogs-region: !Ref AWS::Region
               awslogs-stream-prefix: api
-          HealthCheck:
-            Command:
-              - CMD-SHELL
-              - curl -f http://localhost:8080/actuator/health || exit 1
-            Interval: 30
-            Timeout: 5
-            Retries: 3
-            StartPeriod: 60
 
   SecurityGroupALB:
     Type: AWS::EC2::SecurityGroup
@@ -332,8 +412,8 @@ Resources:
       VpcId: !Ref VpcId
       SecurityGroupIngress:
         - IpProtocol: tcp
-          FromPort: 443
-          ToPort: 443
+          FromPort: 80
+          ToPort: 80
           CidrIp: 0.0.0.0/0
       Tags:
         - Key: Name
@@ -342,12 +422,12 @@ Resources:
   SecurityGroupEcs:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Security group for BTG Pactual ECS tasks
+      GroupDescription: Security group for BTG Pactual ECS EC2 instances
       VpcId: !Ref VpcId
       SecurityGroupIngress:
         - IpProtocol: tcp
-          FromPort: 8080
-          ToPort: 8080
+          FromPort: 32768
+          ToPort: 65535
           SourceSecurityGroupId: !Ref SecurityGroupALB
       Tags:
         - Key: Name
@@ -370,7 +450,7 @@ Resources:
       Port: 8080
       Protocol: HTTP
       VpcId: !Ref VpcId
-      TargetType: ip
+      TargetType: instance
       HealthCheckPath: /actuator/health
       HealthCheckIntervalSeconds: 30
       HealthyThresholdCount: 2
@@ -381,44 +461,30 @@ Resources:
     Type: AWS::ElasticLoadBalancingV2::Listener
     Properties:
       LoadBalancerArn: !Ref ApplicationLoadBalancer
-      Port: 443
-      Protocol: HTTPS
-      Certificates:
-        - CertificateArn: !Ref CertificateArn
+      Port: 80
+      Protocol: HTTP
       DefaultActions:
         - Type: forward
           TargetGroupArn: !Ref TargetGroup
 
-  CertificateArn:
-    Type: AWS::SSM::Parameter
-    Properties:
-      Name: !Sub '/btgpactual/${Environment}/certificate-arn'
-      Type: String
-      Value: 'arn:aws:acm:us-east-1:ACCOUNT_ID:certificate/PLACEHOLDER'
-      Description: ARN del certificado ACM para HTTPS (reemplazar antes del despliegue)
-
   EcsService:
     Type: AWS::ECS::Service
-    DependsOn: ALBListener
+    DependsOn:
+      - ALBListener
+      - EcsClusterCapacityProviderAssociation
     Properties:
       ServiceName: !Sub 'btgpactual-api-${Environment}'
       Cluster: !Ref EcsCluster
       TaskDefinition: !Ref TaskDefinition
-      DesiredCount: !Ref DesiredTaskCount
-      LaunchType: FARGATE
-      NetworkConfiguration:
-        AwsvpcConfiguration:
-          AssignPublicIp: ENABLED
-          Subnets: !Ref SubnetIds
-          SecurityGroups:
-            - !Ref SecurityGroupEcs
+      DesiredCount: 1
+      LaunchType: EC2
       LoadBalancers:
         - ContainerName: btgpactual-api
           ContainerPort: 8080
           TargetGroupArn: !Ref TargetGroup
 
   # ============================================================
-  # API Gateway (HTTP API)
+  # API Gateway HTTP API (Free Tier: 1M requests/mes por 12 meses)
   # ============================================================
 
   HttpApi:
@@ -440,23 +506,13 @@ Resources:
           - '*'
         MaxAge: 3600
 
-  VpcLink:
-    Type: AWS::ApiGatewayV2::VpcLink
-    Properties:
-      Name: !Sub 'btgpactual-vpclink-${Environment}'
-      SubnetIds: !Ref SubnetIds
-      SecurityGroupIds:
-        - !Ref SecurityGroupEcs
-
   HttpApiIntegration:
     Type: AWS::ApiGatewayV2::Integration
     Properties:
       ApiId: !Ref HttpApi
       IntegrationType: HTTP_PROXY
-      IntegrationUri: !GetAtt ALBListener.ListenerArn
+      IntegrationUri: !Sub 'http://${ApplicationLoadBalancer.DNSName}'
       IntegrationMethod: ANY
-      ConnectionType: VPC_LINK
-      ConnectionId: !Ref VpcLink
       PayloadFormatVersion: '1.0'
 
   HttpApiDefaultRoute:
