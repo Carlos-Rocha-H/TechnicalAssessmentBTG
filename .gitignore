@@ -36,6 +36,9 @@ build/
 .vscode/ceiba.code-workspace
 .venv
 
+# Environment variables (secrets)
+.env
+
 # Método Ceiba - Auto-generated agents
 .github/agents/metodo-ceiba-*.agent.md
 
